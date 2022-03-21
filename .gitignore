@@ -133,5 +133,5 @@ data/raw/
 
 data/intermediate/*
 data/raw/*
-
- results/*
+data/*
+results/*
