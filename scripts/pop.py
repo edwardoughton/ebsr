@@ -411,6 +411,8 @@ if __name__ == '__main__':
 
     countries = find_country_list([])
 
+    countries = countries[countries.exclude != 1]
+
     for country in tqdm(countries):
 
         # if country['iso3'] == 'MDV':

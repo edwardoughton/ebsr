@@ -8,6 +8,7 @@ March 2022.
 """
 import os
 import configparser
+from math import ceil
 import glob
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from random import random, uniform
 from itertools import tee
 from tqdm import tqdm
 
-from inputs import parameters
+from inputs import PARAMETERS, COSTS
 
 CONFIG = configparser.ConfigParser()
 CONFIG.read(os.path.join(os.path.dirname(__file__), 'script_config.ini'))
@@ -68,30 +69,6 @@ def find_country_list(continent_list):
     return output
 
 
-def import_hourly_distribution(hourly_distribution, parameters):
-    """
-    Select hours to run model for.
-
-    """
-    output = {}
-
-    # for index, item in hourly_distribution.iterrows():
-
-    #     key = int(item['hour'])
-    #     value = item['percentage_share']#.values[0]
-
-    #     if not key == 17:
-    #         continue
-
-    #     output[key] = value
-
-    key = int(17)
-    value = parameters['busy_hour_traffic_perc']
-    output[key] = value
-
-    return output
-
-
 def find_spectrum_portfolio(country, parameters):
     """
     Function to find the spectrum bands to be used.
@@ -135,93 +112,168 @@ def get_active_users(network_sp_users, active_users_perc, area_km2):
     Estimate the number of active users.
 
     """
+
     active_users = round(
         network_sp_users *
         # (smartphone_users_perc/100) *
-        active_users_perc /
+        (active_users_perc/100) /
         area_km2
     )
 
     return active_users
 
 
-def find_site_density(traffic_km2, spectrum_portfolio,
-    capacity_lookup_table, confidence_intervals):
+def find_site_density(region, parameters, traffic_km2, spectrum_portfolio,
+    capacity_lookup_table, confidence_interval):
     """
-    Given a traffic capacity, find a site density to serve
-    this traffic.
+    For a given region, estimate the number of needed sites.
+
+    Parameters
+    ----------
+    region : dicts
+        Data for a single region.
+    option : dict
+        Contains the scenario and strategy. The strategy string controls
+        the strategy variants being tested in the model and is defined based
+        on the type of technology generation, core and backhaul, and the
+        strategy for infrastructure sharing, the number of networks in each
+        geotype, spectrum and taxation.
+    global_parameters : dict
+        All global model parameters.
+    country_parameters : dict
+        All country specific parameters.
+    capacity_lut : dict
+        A dictionary containing the lookup capacities.
+    ci : int
+        Confidence interval.
+
+    Return
+    ------
+    site_density : float
+        Estimated site density.
 
     """
-    output = {}
+    if region['geotype'] == 'rural':
+        spectrum_portfolio = spectrum_portfolio[:1]
 
-    for frequency in spectrum_portfolio:
-        for confidence_interval in confidence_intervals:
+    unique_densities = set()
 
-            density_lut = []
+    capacity = 0
 
-            for item in capacity_lookup_table:
+    ### Get a unique set of site densities
+    for item in spectrum_portfolio:
 
-                if item['frequency_GHz'] == frequency:
-                    if confidence_interval == item['confidence_interval']:
+        density_capacities = lookup_capacity(
+            capacity_lookup_table,
+            item,
+            10,
+            '4G',
+            confidence_interval
+        )
 
-                        density_lut.append(
-                            (item['sites_per_km2'], item['capacity_mbps_km2'])
-                        )
+        for item in density_capacities:
+            site_density, capacity = item
+            unique_densities.add(site_density)
 
-            density_lut = sorted(density_lut, key=lambda tup: tup[0])
+    density_lut = []
 
-            max_density, max_capacity = density_lut[-1]
-            min_density, min_capacity = density_lut[0]
+    ### Now get capacity for each unique site density + frequency combination
+    for density in list(unique_densities):
 
-            key = '{}_{}'.format(frequency, confidence_interval)
+        capacity = 0
 
-            if traffic_km2 > max_capacity:
+        for item in spectrum_portfolio:
 
-                output[key] = {
-                    'frequency': frequency,
-                    'sites_per_km2': max_density,
-                    'sites_per_km2_upper': max_density,
-                    'capacity_mbps_km2_upper': max_capacity,
-                    'sites_per_km2_lower': max_density,
-                    'capacity_mbps_km2_lower': max_capacity,
-                }
+            density_capacities = lookup_capacity(
+                capacity_lookup_table,
+                item,
+                10,
+                '4G',
+                confidence_interval
+            )
 
-            elif traffic_km2 < min_capacity:
+            for density_capacity in density_capacities:
 
-                output[key] = {
-                    'frequency': frequency,
-                    'sites_per_km2': min_density,
-                    'sites_per_km2_upper': min_density,
-                    'capacity_mbps_km2_upper': min_capacity,
-                    'sites_per_km2_lower': min_density,
-                    'capacity_mbps_km2_lower': min_capacity,
+                if density_capacity[0] == density:
+                    capacity += density_capacity[1]
 
-                }
+        density_lut.append((density, capacity))
 
-            else:
+    density_lut = sorted(density_lut, key=lambda tup: tup[0])
 
-                for a, b in pairwise(density_lut):
+    max_density, max_capacity = density_lut[-1]
+    min_density, min_capacity = density_lut[0]
 
-                    lower_density, lower_capacity  = a
-                    upper_density, upper_capacity  = b
+    # max_capacity = max_capacity * bandwidth
+    # min_capacity = min_capacity * bandwidth
 
-                    if lower_capacity <= traffic_km2 < upper_capacity:
+    if traffic_km2 > max_capacity:
 
-                        site_density = interpolate(
-                            lower_capacity, lower_density,
-                            upper_capacity, upper_density,
-                            traffic_km2
-                        )
+        return max_density
 
-                        output[key] = {
-                            'frequency': frequency,
-                            'sites_per_km2': site_density,
-                            'sites_per_km2_upper': upper_density,
-                            'capacity_mbps_km2_upper': upper_capacity,
-                            'sites_per_km2_lower': lower_density,
-                            'capacity_mbps_km2_lower': lower_capacity,
-                        }
-    print(output)
+    elif traffic_km2 < min_capacity:
+
+        return min_density
+
+    else:
+
+        for a, b in pairwise(density_lut):
+
+            lower_density, lower_capacity  = a
+            upper_density, upper_capacity  = b
+
+            # lower_capacity = lower_capacity * bandwidth
+            # upper_capacity = upper_capacity * bandwidth
+
+            if lower_capacity <= traffic_km2 < upper_capacity:
+
+                site_density = interpolate(
+                    lower_capacity, lower_density,
+                    upper_capacity, upper_density,
+                    traffic_km2
+                )
+
+                return site_density
+
+
+def lookup_capacity(capacity_lut, frequency, bandwidth,
+    generation, confidence_interval):
+    """
+    Use lookup table to find the combination of spectrum bands
+    which meets capacity by frequency, bandwidth, technology
+    generation and site density.
+
+    Parameters
+    ----------
+    capacity_lut : dict
+        A dictionary containing the lookup capacities.
+    frequency : string
+        The frequency band in Megahertz.
+    bandwidth : string
+        Channel bandwidth.
+    generation : string
+        The cellular generation such as 4G or 5G.
+    confidence_interval : int
+        Confidence interval.
+
+    Returns
+    -------
+    site_densities_to_capacities : list of tuples
+        Returns a list of site density to capacity tuples.
+
+    """
+    output = []
+
+    for item in capacity_lut:
+        if item['frequency_GHz'] == frequency:
+            if item['bandwidth_MHz'] == bandwidth:
+                if item['generation'] == generation:
+                    if item['confidence_interval'] == confidence_interval:
+
+                        tup = (item['sites_per_km2'], item['capacity_mbps_km2'])
+
+                        output.append(tup)
+
     return output
 
 
@@ -232,6 +284,59 @@ def interpolate(x0, y0, x1, y1, x):
     y = (y0 * (x1 - x) + y1 * (x - x0)) / (x1 - x0)
 
     return y
+
+
+def estimate_site_upgrades(region, generation, total_sites_required,
+    parameters):
+    """
+    Estimate the number of greenfield sites and brownfield upgrades for the
+    single network being modeled.
+
+    Parameters
+    ----------
+    region : dict
+        Contains all regional data.
+    total_sites_required : int
+        Number of sites needed to meet demand.
+    parameters : dict
+        All country specific parameters.
+
+    Returns
+    -------
+    region : dict
+        Contains all regional data.
+
+    """
+    region['existing_mno_sites'] = ceil(region['total_estimated_sites'] *
+        (parameters['market_share_perc']/100))
+
+    region['existing_4G_sites'] = ceil(region['sites_4G'] *
+        (parameters['market_share_perc']/100))
+
+    if total_sites_required > region['existing_mno_sites']:
+
+        region['new_mno_sites'] = (int(round(total_sites_required -
+            region['existing_mno_sites'])))
+
+        if region['existing_mno_sites'] > 0:
+            if generation == '4G' and region['existing_4G_sites'] > 0 :
+                region['upgraded_mno_sites'] = (region['existing_mno_sites'] -
+                    region['existing_4G_sites'])
+            else:
+                region['upgraded_mno_sites'] = region['existing_mno_sites']
+        else:
+            region['upgraded_mno_sites'] = 0
+
+    else:
+        region['new_mno_sites'] = 0
+
+        if generation == '4G' and region['existing_4G_sites'] > 0 :
+            to_upgrade = total_sites_required - region['existing_4G_sites']
+            region['upgraded_mno_sites'] = to_upgrade if to_upgrade >= 0 else 0
+        else:
+            region['upgraded_mno_sites'] = total_sites_required
+
+    return region
 
 
 def pairwise(iterable):
@@ -273,12 +378,26 @@ def capacity_metrics(capacity_lookup_table, confidence_interval, site_density_km
     return output
 
 
-def calc_costs(site_density_km2):
+def calc_costs(region, costs):
     """
     Calculate cost.
 
     """
-    cost = site_density_km2['sites_per_km2'] * 100000
+    cost = 0
+
+    for i in range(0, region['new_mno_sites']):
+        for key, item in costs.items():
+            cost += item
+
+    for i in range(0, region['upgraded_mno_sites']):
+        for key, item in costs.items():
+
+            if key == 'site_build':
+                continue
+            if key == 'backhaul':
+                continue
+
+            cost += item
 
     return cost
 
@@ -296,19 +415,19 @@ def collect_results(parameters):
 
     for path in paths:
 
-        if not country['iso3'] == 'GBR':
-            continue
+        # if not country['iso3'] == 'GBR':
+        #     continue
 
         data = pd.read_csv(path)
         data = data[[
             'country_name',
             'iso3',
             'iso2',
-            'hour',
+            # 'hour',
             'traffic_perc',
             'traffic_per_user_gb',
             'confidence_interval',
-            'generation',
+            # 'generation',
             'population',
             'area_km2',
             'smartphone_users_perc',
@@ -320,11 +439,11 @@ def collect_results(parameters):
             'country_name',
             'iso3',
             'iso2',
-            'hour',
+            # 'hour',
             'traffic_perc',
             'traffic_per_user_gb',
             'confidence_interval',
-            'generation',
+            # 'generation',
             'smartphone_users_perc']).agg(
             population = ('population','sum'),
             area_km2 = ('area_km2','sum'),
@@ -349,7 +468,7 @@ def collect_results(parameters):
                 'traffic_perc': item['traffic_perc'],
                 'traffic_per_user_gb': item['traffic_per_user_gb'],
                 'confidence_interval': item['confidence_interval'],
-                'generation': item['generation'],
+                # 'generation': item['generation'],
                 'population': item['population'],
                 'area_km2': item['area_km2'],
                 'smartphone_users_perc': item['smartphone_users_perc'],
@@ -376,17 +495,12 @@ if __name__ == "__main__":
     #Load countries list
     countries = find_country_list([])
 
-    #Load demand data inputs
-    path = os.path.join(DATA_RAW, 'hourly_demand', 'hourly_demand.csv')
-    hourly_distribution = pd.read_csv(path)
-    hourly_distribution = import_hourly_distribution(hourly_distribution, parameters)
-
     #Load supply data inputs
     path = os.path.join(DATA_INTERMEDIATE, 'luts', 'capacity_lut_by_frequency.csv')
     capacity_lookup_table = pd.read_csv(path)#[:1]
     # confidence_intervals = capacity_lookup_table['confidence_interval'].unique()[2:3] #50%
     capacity_lookup_table = capacity_lookup_table[capacity_lookup_table['generation'] == '4G']
-    confidence_intervals = [parameters['confidence_level']]
+    confidence_intervals = [PARAMETERS['confidence_level']]
     capacity_lookup_table = capacity_lookup_table[[
         'confidence_interval', 'inter_site_distance_m', 'site_area_km2',
         'sites_per_km2', 'frequency_GHz', 'bandwidth_MHz', 'generation',
@@ -395,13 +509,13 @@ if __name__ == "__main__":
     ]]
     capacity_lookup_table = capacity_lookup_table.to_dict('records')
 
-    active_users_perc = parameters['active_users_perc']
-    market_share_perc = parameters['market_share_perc']
+    active_users_perc = PARAMETERS['active_users_perc']
+    market_share_perc = PARAMETERS['market_share_perc']
 
     for country in tqdm(countries):
 
-        if not country['iso3'] == 'GBR':
-            continue
+        # if not country['iso3'] == 'BFA':
+        #     continue
 
         output = []
 
@@ -412,34 +526,45 @@ if __name__ == "__main__":
             # missing_regional_data.add(country['country_name'])
             continue
 
-        handle = 'traffic_per_user_gb_{}'.format(country['income'])
-        traffic_per_user_gb = parameters[handle]
+        spectrum_portfolio = find_spectrum_portfolio(country, PARAMETERS)
 
-        spectrum_portfolio = find_spectrum_portfolio(country, parameters)
+        handle = 'traffic_per_user_gb_{}'.format(country['income'])
+        traffic_per_user_gb = PARAMETERS[handle]
 
         regional_data = pd.read_csv(path)#[:1]
 
         #Load coverage data
         path = os.path.join(DATA_INTERMEDIATE, country['iso3'], 'regional_coverage.csv')
-        regional_coverage = pd.read_csv(path)[:1]
+        if not os.path.exists(path):
+            # missing_regional_data.add(country['country_name'])
+            continue
+        regional_coverage = pd.read_csv(path)#[:1]
         regional_coverage = regional_coverage[['GID_id', 'total_estimated_sites', 'sites_4G']]
         regional_data = regional_data.merge(regional_coverage, on='GID_id')
 
         for i in tqdm(range(1, 100+1)):
 
-            if not i == 100:
-                continue
+            # if not i == 95:
+            #     continue
 
             smartphone_users_perc = i
 
             for idx, region in regional_data.iterrows():
+
+                # if not region['GID_id'] == 'GBR.3.26.1_1':
+                #     continue
 
                 if region['area_km2'] == 0:
                     continue
 
                 sp_users = int(round(region['population'] * (smartphone_users_perc/100)))
 
-                network_sp_users = sp_users * (market_share_perc/100)
+                network_sp_users = sp_users / (100/market_share_perc)
+
+                if region['population_km2'] > PARAMETERS['urban_rural_pop_density_km2']:
+                    region['geotype'] = 'urban'
+                else:
+                    region['geotype'] = 'rural'
 
                 if round(network_sp_users) == 0:
                     continue
@@ -450,74 +575,70 @@ if __name__ == "__main__":
                     region['area_km2'],
                     )
 
-                for hour, traffic_perc in hourly_distribution.items():
+                per_user_mbps = per_user_hourly_data(
+                    traffic_per_user_gb,
+                    PARAMETERS['busy_hour_traffic_perc'],
+                    )
 
-                    per_user_mbps = per_user_hourly_data(
-                        traffic_per_user_gb,
-                        traffic_perc,
-                        )
+                traffic_km2 = active_users_km2 * per_user_mbps
 
-                    traffic_km2 = active_users_km2 * per_user_mbps
+                for confidence_interval in confidence_intervals:
 
                     site_density_km2 = find_site_density(
+                        region,
+                        PARAMETERS,
                         traffic_km2,
                         spectrum_portfolio,
                         capacity_lookup_table,
-                        confidence_intervals
+                        confidence_interval
                     )
 
-                    for confidence_interval in confidence_intervals:
+                    total_sites_required = ceil(site_density_km2 * region['area_km2'])
 
-                        metrics = capacity_metrics(
-                            capacity_lookup_table,
-                            confidence_interval,
-                            site_density_km2[confidence_interval]
-                        )
+                    region = estimate_site_upgrades(
+                        region,
+                        '4G',
+                        total_sites_required,
+                        PARAMETERS
+                    )
 
-                        costs = calc_costs(
-                            site_density_km2[confidence_interval]
-                            )
+                #     metrics = capacity_metrics(
+                #         capacity_lookup_table,
+                #         confidence_interval,
+                #         site_density_km2[confidence_interval]
+                #     )
 
-                        output.append({
-                            'country_name': country['country_name'],
-                            'GID_id': region['GID_id'],
-                            'iso3': country['iso2'],
-                            'iso2': country['iso2'],
-                            'regional_level': country['regional_level'],
-                            'population': region['population'],
-                            'area_km2': region['area_km2'],
-                            'smartphone_users_perc': smartphone_users_perc,
-                            'sp_users': sp_users,
-                            'network_sp_users': network_sp_users,
-                            'traffic_per_user_gb': traffic_per_user_gb,
-                            'hour': hour,
-                            'traffic_perc': traffic_perc,
-                            'active_users_km2': active_users_km2,
-                            'per_user_mbps': per_user_mbps,
-                            'traffic_km2': traffic_km2,
-                            'confidence_interval': confidence_interval,
-                            'inter_site_distance_m': metrics['inter_site_distance_m'],
-                            'site_area_km2': metrics['site_area_km2'],
-                            'sites_per_km2': metrics['sites_per_km2'],
-                            'total_sites': metrics['site_area_km2'] * region['area_km2'],
-                            'pop_per_sites': region['population'] / (metrics['site_area_km2'] * region['area_km2']),
-                            'network_sp_users_per_site': network_sp_users / (metrics['site_area_km2'] * region['area_km2']),
-                            'active_users_per_site': active_users_km2 / (metrics['site_area_km2'] * region['area_km2']),
-                            'frequency_GHz': metrics['frequency_GHz'],
-                            'bandwidth_MHz': metrics['bandwidth_MHz'],
-                            'generation': metrics['generation'],
-                            'path_loss_dB': metrics['path_loss_dB'],
-                            'received_power_dBm': metrics['received_power_dBm'],
-                            'interference_dBm': metrics['interference_dBm'],
-                            'noise_dB': metrics['noise_dB'],
-                            'sinr_dB': metrics['sinr_dB'],
-                            'spectral_efficiency_bps_hz': metrics['spectral_efficiency_bps_hz'],
-                            'capacity_mbps': metrics['capacity_mbps'],
-                            'capacity_mbps_km2': metrics['capacity_mbps_km2'],
-                            'cost_km2': costs * (100/market_share_perc),
-                            'cost_per_sp_user': int(round((costs * region['area_km2']) / sp_users)),
-                            'total_regional_cost': int(round((costs * region['area_km2']) / sp_users) * sp_users),
-                        })
+                    cost = calc_costs(region, COSTS)
+
+                    output.append({
+                        'country_name': country['country_name'],
+                        'GID_id': region['GID_id'],
+                        'iso3': country['iso2'],
+                        'iso2': country['iso2'],
+                        'regional_level': country['regional_level'],
+                        'population': region['population'],
+                        'area_km2': region['area_km2'],
+                        'population_km2': region['population_km2'],
+                        'smartphone_users_perc': smartphone_users_perc,
+                        'sp_users': sp_users,
+                        'network_sp_users': network_sp_users,
+                        'traffic_per_user_gb': traffic_per_user_gb,
+                        # 'hour': hour,
+                        'traffic_perc': PARAMETERS['busy_hour_traffic_perc'],
+                        'active_users_km2': active_users_km2,
+                        'per_user_mbps': per_user_mbps,
+                        'traffic_km2': traffic_km2,
+                        'confidence_interval': confidence_interval,
+                        'total_estimated_sites': region['total_estimated_sites'],
+                        'sites_4G': region['sites_4G'],
+                        'existing_mno_sites': region['existing_mno_sites'],
+                        'existing_4G_sites ': region['existing_4G_sites'],
+                        'new_mno_sites ': region['new_mno_sites'],
+                        'upgraded_mno_sites ': region['upgraded_mno_sites'],
+                        'cost_km2': cost / region['area_km2'],
+                        'cost_per_sp_user': int(round(cost / sp_users)),
+                        'total_regional_cost': int(round(cost / sp_users) * sp_users),
+                    })
 
         output = pd.DataFrame(output)
 
@@ -529,4 +650,4 @@ if __name__ == "__main__":
         path = os.path.join(directory, filename)
         output.to_csv(path, index=False)
 
-    collect_results(parameters)
+    collect_results(PARAMETERS)
