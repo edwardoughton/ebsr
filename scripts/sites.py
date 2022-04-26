@@ -56,6 +56,8 @@ def find_country_list(continent_list):
     glob_info_path = os.path.join(BASE_PATH, 'global_information.csv')
     countries = pd.read_csv(glob_info_path, encoding = "ISO-8859-1")
 
+    countries = countries[countries.exclude != 1]
+
     if len(continent_list) > 0:
         data = countries.loc[countries['continent'].isin(continent_list)]
     else:
@@ -237,8 +239,8 @@ def get_regional_data(country):
 
     path_output = os.path.join(DATA_INTERMEDIATE, iso3, 'regional_coverage.csv')
 
-    # if os.path.exists(path_output):
-    #     return print('Regional data already exists')
+    if os.path.exists(path_output):
+        return #print('Regional data already exists')
 
     path_country = os.path.join(DATA_INTERMEDIATE, iso3,
         'national_outline.shp')
@@ -417,7 +419,10 @@ def estimate_sites(data, iso3, backhaul_lut):
     path = os.path.join(DATA_RAW, 'wb_mobile_coverage', 'wb_population_coverage_2G.csv')
     coverage = pd.read_csv(path, encoding='latin-1')
     coverage = coverage.loc[coverage['Country ISO3'] == iso3]
-    coverage = coverage['2020'].values[0]
+    if len(coverage) > 1:
+        coverage = coverage['2020'].values[0]
+    else:
+        coverage = 0
 
     population_covered = population * (coverage / 100)
 
@@ -426,7 +431,11 @@ def estimate_sites(data, iso3, backhaul_lut):
     towers = towers.loc[towers['iso3'] == iso3]
     towers = towers['sites'].values[0]
 
-    towers_per_pop = towers / population_covered
+    if np.isnan(towers):
+        towers = 0
+        towers_per_pop = 0
+    else:
+        towers_per_pop = towers / population_covered
 
     tower_backhaul_lut = estimate_backhaul_type(backhaul_lut)
 
@@ -2041,18 +2050,22 @@ def forecast_smartphones_linear(data, country, start_point, end_point):
 
 if __name__ == '__main__':
 
-    countries = find_country_list([])
+    countries = find_country_list([])[::-1]
 
     for country in countries:
 
-        # if not country['iso3'] == 'GBR':
+        # if not country['iso3'] == 'BEN':
         #     continue
-        try:
-            process_coverage_shapes(country)
+        # try:
 
-            get_regional_data(country)
-        except:
+        if os.path.exists(os.path.join(DATA_INTERMEDIATE, country['iso3'], 'regional_coverage.csv')):
             continue
+
+        process_coverage_shapes(country)
+
+        get_regional_data(country)
+        # except:
+        #     continue
 
         # print('Generating agglomeration lookup table')
         # generate_agglomeration_lut(country)
