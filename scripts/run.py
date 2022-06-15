@@ -415,23 +415,22 @@ def collect_results(parameters):
 
     for path in paths:
 
-        # if not country['iso3'] == 'GBR':
+        # if not path.endswith('AFG.csv'):
         #     continue
 
         data = pd.read_csv(path)
+
         data = data[[
             'country_name',
             'iso3',
             'iso2',
-            # 'hour',
-            'traffic_perc',
-            'traffic_per_user_gb',
-            'confidence_interval',
-            # 'generation',
             'population',
             'area_km2',
             'smartphone_users_perc',
             'sp_users',
+            'traffic_per_user_gb',
+            'traffic_perc',
+            'confidence_interval',
             'total_regional_cost',
         ]]
 
@@ -451,6 +450,8 @@ def collect_results(parameters):
             total_cost = ('total_regional_cost','sum'),
             ).reset_index()
 
+        data['sp_users_km2'] = data['sp_users'] / data['area_km2']
+
         data = data.sort_values('smartphone_users_perc')
 
         interim = []
@@ -460,6 +461,8 @@ def collect_results(parameters):
         for idx, item in data.iterrows():
 
             total_cost = item['total_cost']
+            incremental_cost = total_cost - quant
+            cost_per_sp_user = (total_cost - quant) / item['sp_users']
 
             interim.append({
                 'country_name': item['country_name'],
@@ -468,14 +471,14 @@ def collect_results(parameters):
                 'traffic_perc': item['traffic_perc'],
                 'traffic_per_user_gb': item['traffic_per_user_gb'],
                 'confidence_interval': item['confidence_interval'],
-                # 'generation': item['generation'],
                 'population': item['population'],
                 'area_km2': item['area_km2'],
                 'smartphone_users_perc': item['smartphone_users_perc'],
                 'sp_users': item['sp_users'],
+                'sp_users_km2': item['sp_users_km2'],
                 'total_cost': total_cost,
-                'incremental_cost': total_cost - quant,
-                'cost_per_sp_user': (total_cost - quant) / item['sp_users'],
+                'incremental_cost': incremental_cost if incremental_cost > 0 else 0,
+                'cost_per_sp_user': cost_per_sp_user if cost_per_sp_user > 0 else 0,
             })
 
             quant = item['total_cost']
@@ -514,7 +517,7 @@ if __name__ == "__main__":
 
     for country in tqdm(countries):
 
-        # if not country['iso3'] == 'BFA':
+        # if not country['iso3'] == 'AFG':
         #     continue
 
         output = []
@@ -540,12 +543,9 @@ if __name__ == "__main__":
             continue
         regional_coverage = pd.read_csv(path)#[:1]
         regional_coverage = regional_coverage[['GID_id', 'total_estimated_sites', 'sites_4G']]
-        regional_data = regional_data.merge(regional_coverage, on='GID_id')
+        regional_data = regional_data.merge(regional_coverage, on='GID_id')#[:1]
 
-        for i in tqdm(range(1, 100+1)):
-
-            # if not i == 95:
-            #     continue
+        for i in tqdm(range(0, 100+1, 5)):
 
             smartphone_users_perc = i
 
@@ -557,9 +557,12 @@ if __name__ == "__main__":
                 if region['area_km2'] == 0:
                     continue
 
-                sp_users = int(round(region['population'] * (smartphone_users_perc/100)))
-
-                network_sp_users = sp_users / (100/market_share_perc)
+                if smartphone_users_perc == 0:
+                    sp_users = 1
+                    network_sp_users = 1
+                else:
+                    sp_users = int(round(region['population'] * (smartphone_users_perc/100)))
+                    network_sp_users = sp_users / (100/market_share_perc)
 
                 if region['population_km2'] > PARAMETERS['urban_rural_pop_density_km2']:
                     region['geotype'] = 'urban'
