@@ -380,7 +380,7 @@ if __name__ == '__main__':
         for n in range(min, max, increment):
             yield n
 
-    INCREMENT_MA = (125, 21000, 125)
+    INCREMENT_MA = (125, 31000, 125)
 
     SITE_RADII = {
         'macro': {
