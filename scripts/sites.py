@@ -2058,7 +2058,10 @@ if __name__ == '__main__':
         #     continue
         # try:
 
-        if os.path.exists(os.path.join(DATA_INTERMEDIATE, country['iso3'], 'regional_coverage.csv')):
+        filename = 'regional_coverage.csv'
+        folder = os.path.join(DATA_INTERMEDIATE, country['iso3'])
+        path_out = os.path.join(folder, filename)
+        if os.path.exists(path_out):
             continue
 
         process_coverage_shapes(country)
