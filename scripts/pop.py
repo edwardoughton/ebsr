@@ -70,6 +70,7 @@ def find_country_list(continent_list):
             'iso3': country['ISO_3digit'],
             'iso2': country['ISO_2digit'],
             'regional_level': country['lowest'],
+            'exclude': country['exclude'],
         })
 
     return output
@@ -101,11 +102,12 @@ def process_country_shapes(country):
 
     single_country = countries[countries.GID_0 == iso3]
 
-    try:
-        single_country['geometry'] = single_country.apply(
-            drop_small_polygons, axis=1)
-    except:
-        return 'All small shapes'
+    if not iso3 == 'MDV':
+        try:
+            single_country['geometry'] = single_country.apply(
+                drop_small_polygons, axis=1)
+        except:
+                return 'All small shapes'
 
     glob_info_path = os.path.join(BASE_PATH, 'global_information.csv')
     load_glob_info = pd.read_csv(glob_info_path, encoding = "ISO-8859-1")
@@ -132,9 +134,8 @@ def drop_small_polygons(x):
         Shapely MultiPolygon geometry without small  polygons.
 
     """
-    # print(x)
+
     if x.geometry.geom_type == 'Polygon':
-        # print('a')
         return x.geometry
 
     elif x.geometry.geom_type == 'MultiPolygon':
@@ -144,7 +145,7 @@ def drop_small_polygons(x):
 
         if x.geometry.area < area1:
             return x.geometry
-        # print('b')
+
         if x['GID_0'] in ['CHL','IDN']:
             threshold = 0.01
         elif x['GID_0'] in ['RUS','GRL','CAN','USA']:
@@ -153,14 +154,13 @@ def drop_small_polygons(x):
             threshold = 0.1
         else:
             threshold = 0.001
-        # print('c')
+
         new_geom = []
         for y in x.geometry:
             if y.area > threshold:
                 new_geom.append(y)
-        # print('d')
+
         return MultiPolygon(new_geom)
-    # print('there')
 
 
 def process_regions(country):
@@ -199,12 +199,12 @@ def process_regions(country):
 
         if len(regions) == 0:
             print('{} has no regions at level {}'.format(iso3, regional_level))
-        try:
-            # print('1')
-            regions['geometry'] = regions.apply(drop_small_polygons, axis=1)
-            # print('2')
-        except:
-            return 'All small shapes'
+
+        if not iso3 == 'MDV':
+            try:
+                regions['geometry'] = regions.apply(drop_small_polygons, axis=1)
+            except:
+                return 'All small shapes'
 
         try:
             regions.to_file(path_processed, driver='ESRI Shapefile')
@@ -253,7 +253,7 @@ def process_settlement_layer(country):
     geo = gpd.GeoDataFrame()
     minx, miny, maxx, maxy = country['geometry'].total_bounds
     bbox = box(minx, miny, maxx, maxy)
-    geo = gpd.GeoDataFrame({'geometry': bbox}, index=[0])
+    geo = gpd.GeoDataFrame({'geometry': [bbox]}, index=[0])
     # bbox = country['geometry']
     # geo = gpd.GeoDataFrame({'geometry': bbox})
 
@@ -351,8 +351,6 @@ def get_pop_data(country):
 
     results_df = pd.DataFrame(results)
 
-    print(round(results_df['population'].sum()/1e6,2))
-
     results_df.to_csv(path_output, index=False)
 
     return
@@ -411,24 +409,27 @@ if __name__ == '__main__':
 
     countries = find_country_list([])
 
-    countries = countries[countries.exclude != 1]
-
     for country in tqdm(countries):
 
-        # if country['iso3'] == 'MDV':
+        if country['exclude'] == 1:
+            continue
+
+        # if not country['iso3'] == 'GBR':
         #     continue
 
         path = os.path.join(DATA_INTERMEDIATE, country['iso3'], 'regional_data.csv')
 
-        if os.path.exists(path):
-            continue
+        # if os.path.exists(path):
+        #     continue
 
         print('--Working on {}'.format(country['iso3']))
 
         process_country_shapes(country)
 
         response = process_regions(country)
+
         if response == 'All small shapes':
+            print('All small shapes fail: {}'.format(country['iso3']))
             continue
 
         process_settlement_layer(country)
@@ -440,4 +441,4 @@ if __name__ == '__main__':
             print('--  {} failed'.format(country['country_name']))
             continue
 
-    collect_results(countries)
+    # collect_results(countries)

@@ -64,6 +64,10 @@ def find_country_list(continent_list):
             'iso2': country['ISO_2digit'],
             'regional_level': country['lowest'],
             'income': country['income'].lower(),
+            'continent': country['continent'],
+            'region': country['region'],
+            'exclude': country['exclude'],
+            'operators': country['operators'],
         })
 
     return output
@@ -117,7 +121,7 @@ def get_active_users(network_sp_users, active_users_perc, area_km2):
         network_sp_users *
         # (smartphone_users_perc/100) *
         (active_users_perc/100) /
-        area_km2
+        area_km2, 0
     )
 
     return active_users
@@ -286,7 +290,7 @@ def interpolate(x0, y0, x1, y1, x):
     return y
 
 
-def estimate_site_upgrades(region, generation, total_sites_required,
+def estimate_site_upgrades(region, generation, mno_sites_required,
     parameters):
     """
     Estimate the number of greenfield sites and brownfield upgrades for the
@@ -296,7 +300,7 @@ def estimate_site_upgrades(region, generation, total_sites_required,
     ----------
     region : dict
         Contains all regional data.
-    total_sites_required : int
+    mno_sites_required : int
         Number of sites needed to meet demand.
     parameters : dict
         All country specific parameters.
@@ -307,15 +311,21 @@ def estimate_site_upgrades(region, generation, total_sites_required,
         Contains all regional data.
 
     """
-    region['existing_mno_sites'] = ceil(region['total_estimated_sites'] *
-        (parameters['market_share_perc']/100))
+    region['existing_mno_sites'] = ceil(
+        region['total_existing_sites_2G'] *
+        (parameters['market_share_perc']/100) #/
+        # parameters['cells_per_site_2G']
+    )
 
-    region['existing_4G_sites'] = ceil(region['sites_4G'] *
-        (parameters['market_share_perc']/100))
+    region['existing_4G_sites'] = ceil(
+        region['total_existing_sites_4G'] *
+        (parameters['market_share_perc']/100) #/
+        # parameters['cells_per_site_4G']
+    )
 
-    if total_sites_required > region['existing_mno_sites']:
+    if mno_sites_required > region['existing_mno_sites']:
 
-        region['new_mno_sites'] = (int(round(total_sites_required -
+        region['new_mno_sites'] = (int(round(mno_sites_required -
             region['existing_mno_sites'])))
 
         if region['existing_mno_sites'] > 0:
@@ -331,10 +341,10 @@ def estimate_site_upgrades(region, generation, total_sites_required,
         region['new_mno_sites'] = 0
 
         if generation == '4G' and region['existing_4G_sites'] > 0 :
-            to_upgrade = total_sites_required - region['existing_4G_sites']
+            to_upgrade = mno_sites_required - region['existing_4G_sites']
             region['upgraded_mno_sites'] = to_upgrade if to_upgrade >= 0 else 0
         else:
-            region['upgraded_mno_sites'] = total_sites_required
+            region['upgraded_mno_sites'] = mno_sites_required
 
     return region
 
@@ -378,16 +388,31 @@ def capacity_metrics(capacity_lookup_table, confidence_interval, site_density_km
     return output
 
 
-def calc_costs(region, costs):
+def calc_mno_costs(region, costs):
     """
-    Calculate cost.
+    Calculate costs for an mno.
+
+    mno_cost_entirely_greenfield = mno cost to build all infra from scratch.
+
+    mno_cost_using_existing_infra = mno cost excluding existing infra.
 
     """
-    cost = 0
+    mno_cost_entirely_greenfield = 0
+
+    for i in range(0, region['mno_sites_required']):
+        for key, item in costs.items():
+            mno_cost_entirely_greenfield += item
+
+    region['mno_cost_entirely_greenfield_tco'] = (
+        mno_cost_entirely_greenfield + #capex
+        mno_cost_entirely_greenfield   #opex
+    )
+
+    mno_cost_using_existing_infra = 0
 
     for i in range(0, region['new_mno_sites']):
         for key, item in costs.items():
-            cost += item
+            mno_cost_using_existing_infra += item
 
     for i in range(0, region['upgraded_mno_sites']):
         for key, item in costs.items():
@@ -397,12 +422,35 @@ def calc_costs(region, costs):
             if key == 'backhaul':
                 continue
 
-            cost += item
+            mno_cost_using_existing_infra += item
 
-    return cost
+    region['mno_cost_using_existing_infra_tco'] = (
+        mno_cost_using_existing_infra + #capex
+        mno_cost_using_existing_infra   #opex
+    )
+
+    return region
 
 
-def collect_results(parameters):
+def calc_total_costs(region, market_share_perc):
+    """
+    Calculate costs to serve all users.
+
+    """
+    region['total_cost_entirely_greenfield_tco'] = (
+        region['mno_cost_entirely_greenfield_tco'] *
+        (100/market_share_perc)
+    )
+
+    region['total_cost_using_existing_infra_tco'] = (
+        region['mno_cost_using_existing_infra_tco'] *
+        (100/market_share_perc)
+    )
+
+    return region
+
+
+def collect_results(countries, parameters):
     """
     Get final results.
 
@@ -415,10 +463,22 @@ def collect_results(parameters):
 
     for path in paths:
 
-        # if not path.endswith('AFG.csv'):
+        iso3 = os.path.basename(path)[:-4]
+
+        for item in countries:
+            if item['iso3'] == iso3:
+                income = item['income']
+                continent = item['continent']
+                region = item['region']
+                break
+
+        # if not path.endswith('BRA.csv'):
         #     continue
 
         data = pd.read_csv(path)
+
+        if not 'total_cost_entirely_greenfield_tco' in data.columns:
+            continue
 
         data = data[[
             'country_name',
@@ -431,7 +491,8 @@ def collect_results(parameters):
             'traffic_per_user_gb',
             'traffic_perc',
             'confidence_interval',
-            'total_regional_cost',
+            'total_cost_entirely_greenfield_tco',
+            'total_cost_using_existing_infra_tco'
         ]]
 
         data = data.groupby([
@@ -447,7 +508,8 @@ def collect_results(parameters):
             population = ('population','sum'),
             area_km2 = ('area_km2','sum'),
             sp_users = ('sp_users','sum'),
-            total_cost = ('total_regional_cost','sum'),
+            total_cost_entirely_greenfield_tco = ('total_cost_entirely_greenfield_tco','sum'),
+            total_cost_using_existing_infra_tco = ('total_cost_using_existing_infra_tco','sum'),
             ).reset_index()
 
         data['sp_users_km2'] = data['sp_users'] / data['area_km2']
@@ -456,32 +518,100 @@ def collect_results(parameters):
 
         interim = []
 
-        quant = 0
+        cost_quant_entirely_greenfield = 0
+        cost_quant_existing_infra = 0
+        sp_users_so_far = 0
+        sp_users_quant = 0
 
         for idx, item in data.iterrows():
 
-            total_cost = item['total_cost']
-            incremental_cost = total_cost - quant
-            cost_per_sp_user = (total_cost - quant) / item['sp_users']
+            total_cost_entirely_greenfield_tco = item['total_cost_entirely_greenfield_tco']
+            if total_cost_entirely_greenfield_tco > 0:
+                incremental_cost_entirely_gf = total_cost_entirely_greenfield_tco - cost_quant_entirely_greenfield
+                cost_per_sp_user_entirely_gf = (total_cost_entirely_greenfield_tco - cost_quant_entirely_greenfield) / item['sp_users']
+            else:
+                total_cost_entirely_greenfield_tco = 0
+                incremental_cost_entirely_gf = 0
+                cost_per_sp_user_entirely_gf = 0
+
+            total_cost_using_existing_infra_tco = item['total_cost_using_existing_infra_tco']
+            if total_cost_using_existing_infra_tco > 0:
+                incremental_cost_using_existing_infra = total_cost_using_existing_infra_tco - cost_quant_existing_infra
+                cost_per_sp_user_using_existing_infra = (total_cost_using_existing_infra_tco - cost_quant_existing_infra) / item['sp_users']
+            else:
+                total_cost_using_existing_infra_tco = 0
+                incremental_cost_using_existing_infra = 0
+                cost_per_sp_user_using_existing_infra = 0
+
+            if idx == 0:
+
+                sp_users_quant = item['sp_users']
+                sp_users_so_far += sp_users_quant
+
+                if total_cost_entirely_greenfield_tco > 0:
+                    cost_per_sp_user_entirely_gf = (
+                        total_cost_entirely_greenfield_tco / item['sp_users']
+                    )
+                else:
+                    cost_per_sp_user_entirely_gf = 0
+
+                if total_cost_using_existing_infra_tco > 0:
+                    cost_per_sp_user_using_existing_infra = (
+                        total_cost_using_existing_infra_tco / item['sp_users']
+                    )
+                else:
+                    cost_per_sp_user_using_existing_infra = 0
+
+            else:
+                sp_users_quant = item['sp_users'] - sp_users_so_far
+                sp_users_so_far += sp_users_quant
+
+                if incremental_cost_entirely_gf > 0:
+                    cost_per_sp_user_entirely_gf = (
+                        incremental_cost_entirely_gf /
+                        sp_users_quant
+                    )
+                else:
+                    cost_per_sp_user_entirely_gf = 0
+
+                if incremental_cost_using_existing_infra > 0:
+                    cost_per_sp_user_using_existing_infra = (
+                        incremental_cost_using_existing_infra /
+                        sp_users_quant
+                    )
+                else:
+                    cost_per_sp_user_using_existing_infra = 0
 
             interim.append({
                 'country_name': item['country_name'],
                 'iso3': item['iso3'],
                 'iso2': item['iso2'],
+                'income': income,
+                'continent': continent,
+                'region': region,
                 'traffic_perc': item['traffic_perc'],
                 'traffic_per_user_gb': item['traffic_per_user_gb'],
                 'confidence_interval': item['confidence_interval'],
-                'population': item['population'],
-                'area_km2': item['area_km2'],
+                'population': round(item['population']),
+                'area_km2': round(item['area_km2']),
                 'smartphone_users_perc': item['smartphone_users_perc'],
-                'sp_users': item['sp_users'],
-                'sp_users_km2': item['sp_users_km2'],
-                'total_cost': total_cost,
-                'incremental_cost': incremental_cost if incremental_cost > 0 else 0,
-                'cost_per_sp_user': cost_per_sp_user if cost_per_sp_user > 0 else 0,
+                'sp_users': round(item['sp_users']),
+                'sp_users_km2': round(item['sp_users_km2']),
+                'total_cost_entirely_greenfield_tco': round(total_cost_entirely_greenfield_tco),
+                'incremental_cost_entirely_gf': round(
+                    incremental_cost_entirely_gf if incremental_cost_entirely_gf > 0 else 0),
+                'cost_per_sp_user_entirely_gf': round(
+                    cost_per_sp_user_entirely_gf if cost_per_sp_user_entirely_gf > 0 else 0, 2),
+                'total_cost_using_existing_infra_tco': round(total_cost_using_existing_infra_tco),
+                'incremental_cost_using_existing_infra': round(
+                    incremental_cost_using_existing_infra if incremental_cost_using_existing_infra > 0 else 0),
+                'cost_per_sp_user_using_existing_infra': round(cost_per_sp_user_using_existing_infra, 2),
+                'sp_users_quant': round(sp_users_quant if sp_users_quant > 0 else 0),
+                'sp_users_so_far': sp_users_so_far,
             })
 
-            quant = item['total_cost']
+            cost_quant_entirely_greenfield = item['total_cost_entirely_greenfield_tco']
+            cost_quant_existing_infra = item['total_cost_using_existing_infra_tco']
 
         output = output + interim
 
@@ -495,13 +625,10 @@ def collect_results(parameters):
 
 if __name__ == "__main__":
 
-    #Load countries list
     countries = find_country_list([])
 
-    #Load supply data inputs
     path = os.path.join(DATA_INTERMEDIATE, 'luts', 'capacity_lut_by_frequency.csv')
-    capacity_lookup_table = pd.read_csv(path)#[:1]
-    # confidence_intervals = capacity_lookup_table['confidence_interval'].unique()[2:3] #50%
+    capacity_lookup_table = pd.read_csv(path)
     capacity_lookup_table = capacity_lookup_table[capacity_lookup_table['generation'] == '4G']
     confidence_intervals = [PARAMETERS['confidence_level']]
     capacity_lookup_table = capacity_lookup_table[[
@@ -510,24 +637,30 @@ if __name__ == "__main__":
         'path_loss_dB', 'received_power_dBm', 'interference_dBm', 'noise_dB', 'sinr_dB',
         'spectral_efficiency_bps_hz', 'capacity_mbps', 'capacity_mbps_km2'
     ]]
+    # capacity_lookup_table = capacity_lookup_table.loc[capacity_lookup_table['inter_site_distance_m'] < 40000]
     capacity_lookup_table = capacity_lookup_table.to_dict('records')
 
     active_users_perc = PARAMETERS['active_users_perc']
-    market_share_perc = PARAMETERS['market_share_perc']
 
     for country in tqdm(countries):
 
-        # if not country['iso3'] == 'AFG':
+        # if not country['iso3'] == 'GBR': #BGD
         #     continue
+
+        if country['exclude'] == 1:
+            continue
+
+        market_share_perc = round(100 / country['operators'])
+        PARAMETERS['market_share_perc'] = market_share_perc
 
         output = []
 
         #Load population data
         path = os.path.join(DATA_INTERMEDIATE, country['iso3'], 'regional_data.csv')
 
-        if not os.path.exists(path):
-            # missing_regional_data.add(country['country_name'])
-            continue
+        # if not os.path.exists(path):
+        #     # missing_regional_data.add(country['country_name'])
+        #     continue
 
         spectrum_portfolio = find_spectrum_portfolio(country, PARAMETERS)
 
@@ -542,14 +675,71 @@ if __name__ == "__main__":
             # missing_regional_data.add(country['country_name'])
             continue
         regional_coverage = pd.read_csv(path)#[:1]
-        regional_coverage = regional_coverage[['GID_id', 'total_estimated_sites', 'sites_4G']]
+        regional_coverage = regional_coverage[['GID_id',
+            'total_existing_sites_2G', 'total_existing_sites_4G']]
+        # regional_coverage.rename({
+        #     # 'GID_id': 'GID_id',
+        #     'total_estimated_sites': 'total_existing_sites',
+        #     'sites_4G': 'total_existing_sites_4G'}, axis=1, inplace=True)
         regional_data = regional_data.merge(regional_coverage, on='GID_id')#[:1]
+        regional_data = regional_data.sort_values(by='population_km2', ascending=False)
+        population = regional_data['population'].sum()
 
-        for i in tqdm(range(0, 100+1, 5)):
+        for i in tqdm(range(10, 100+1, 10)):
 
-            smartphone_users_perc = i
+            # if not i == 100:
+            #     continue
+
+            allocated_sp_users = 0
+
+            sp_users_perc = i
+            # if sp_users_perc == 0:
+            #     sp_users = 1
+            #     network_sp_users = 1
+            #     allocated_sp_users += 1
+            #     total_sp_users = 1
+            # else:
+            #     total_sp_users = population * (sp_users_perc/100)
+            total_sp_users = population * (sp_users_perc/100)
 
             for idx, region in regional_data.iterrows():
+
+                if allocated_sp_users >= total_sp_users:
+                    output.append({
+                            'country_name': country['country_name'],
+                            'GID_id': region['GID_id'],
+                            'iso3': country['iso3'],
+                            'iso2': country['iso2'],
+                            'regional_level': country['regional_level'],
+                            'population': region['population'],
+                            'area_km2': region['area_km2'],
+                            'population_km2': region['population_km2'],
+                            'smartphone_users_perc': sp_users_perc,
+                            'sp_users': 0,
+                            'network_sp_users': 0,
+                            'market_share_perc': market_share_perc,
+                            'traffic_per_user_gb': traffic_per_user_gb,
+                            # 'hour': hour,
+                            'traffic_perc': PARAMETERS['busy_hour_traffic_perc'],
+                            'active_users_km2': 0,
+                            'per_user_mbps': 0,
+                            'traffic_km2': 0,
+                            'confidence_interval': PARAMETERS['confidence_level'],
+                            'total_existing_sites_2G': round(region['total_existing_sites_2G']),
+                            'total_existing_sites_4G': round(region['total_existing_sites_4G']),
+                            'mno_existing_sites': 0,
+                            'mno_existing_4G_sites ': 0,
+                            'mno_sites_required': 0,
+                            'mno_sites_required_km2': 0,
+                            'mno_cost_entirely_greenfield_tco': 0,
+                            'total_cost_entirely_greenfield_tco': 0,
+                            'mno_new_sites ': 0,
+                            'mno_upgraded_sites ': 0,
+                            'mno_cost_using_existing_infra_tco': 0,
+                            'total_cost_using_existing_infra_tco': 0,
+                        })
+
+                    continue
 
                 # if not region['GID_id'] == 'GBR.3.26.1_1':
                 #     continue
@@ -557,12 +747,13 @@ if __name__ == "__main__":
                 if region['area_km2'] == 0:
                     continue
 
-                if smartphone_users_perc == 0:
-                    sp_users = 1
-                    network_sp_users = 1
+                allocated_sp_users += region['population']
+
+                if allocated_sp_users > total_sp_users:
+                    sp_users = round(allocated_sp_users - total_sp_users)
                 else:
-                    sp_users = int(round(region['population'] * (smartphone_users_perc/100)))
-                    network_sp_users = sp_users / (100/market_share_perc)
+                    sp_users = round(region['population'])
+                network_sp_users = round(sp_users / (100/market_share_perc))
 
                 if region['population_km2'] > PARAMETERS['urban_rural_pop_density_km2']:
                     region['geotype'] = 'urban'
@@ -585,63 +776,66 @@ if __name__ == "__main__":
 
                 traffic_km2 = active_users_km2 * per_user_mbps
 
-                for confidence_interval in confidence_intervals:
+                # for confidence_interval in confidence_intervals:
 
-                    site_density_km2 = find_site_density(
-                        region,
-                        PARAMETERS,
-                        traffic_km2,
-                        spectrum_portfolio,
-                        capacity_lookup_table,
-                        confidence_interval
-                    )
+                site_density_km2 = find_site_density(
+                    region,
+                    PARAMETERS,
+                    traffic_km2,
+                    spectrum_portfolio,
+                    capacity_lookup_table,
+                    PARAMETERS['confidence_level']
+                )
 
-                    total_sites_required = ceil(site_density_km2 * region['area_km2'])
+                region['mno_sites_required'] = ceil(site_density_km2 * region['area_km2'])
 
-                    region = estimate_site_upgrades(
-                        region,
-                        '4G',
-                        total_sites_required,
-                        PARAMETERS
-                    )
+                region = estimate_site_upgrades(
+                    region,
+                    '4G',
+                    region['mno_sites_required'],
+                    PARAMETERS
+                )
 
-                #     metrics = capacity_metrics(
-                #         capacity_lookup_table,
-                #         confidence_interval,
-                #         site_density_km2[confidence_interval]
-                #     )
+                region = calc_mno_costs(region, COSTS)
 
-                    cost = calc_costs(region, COSTS)
+                region = calc_total_costs(region, market_share_perc)
 
-                    output.append({
-                        'country_name': country['country_name'],
-                        'GID_id': region['GID_id'],
-                        'iso3': country['iso2'],
-                        'iso2': country['iso2'],
-                        'regional_level': country['regional_level'],
-                        'population': region['population'],
-                        'area_km2': region['area_km2'],
-                        'population_km2': region['population_km2'],
-                        'smartphone_users_perc': smartphone_users_perc,
-                        'sp_users': sp_users,
-                        'network_sp_users': network_sp_users,
-                        'traffic_per_user_gb': traffic_per_user_gb,
-                        # 'hour': hour,
-                        'traffic_perc': PARAMETERS['busy_hour_traffic_perc'],
-                        'active_users_km2': active_users_km2,
-                        'per_user_mbps': per_user_mbps,
-                        'traffic_km2': traffic_km2,
-                        'confidence_interval': confidence_interval,
-                        'total_estimated_sites': region['total_estimated_sites'],
-                        'sites_4G': region['sites_4G'],
-                        'existing_mno_sites': region['existing_mno_sites'],
-                        'existing_4G_sites ': region['existing_4G_sites'],
-                        'new_mno_sites ': region['new_mno_sites'],
-                        'upgraded_mno_sites ': region['upgraded_mno_sites'],
-                        'cost_km2': cost / region['area_km2'],
-                        'cost_per_sp_user': int(round(cost / sp_users)),
-                        'total_regional_cost': int(round(cost / sp_users) * sp_users),
-                    })
+                output.append({
+                    'country_name': country['country_name'],
+                    'GID_id': region['GID_id'],
+                    'iso3': country['iso3'],
+                    'iso2': country['iso2'],
+                    'regional_level': country['regional_level'],
+                    'population': region['population'],
+                    'area_km2': region['area_km2'],
+                    'population_km2': region['population_km2'],
+                    'smartphone_users_perc': sp_users_perc,
+                    'sp_users': round(sp_users),
+                    'network_sp_users': network_sp_users,
+                    'traffic_per_user_gb': traffic_per_user_gb,
+                    # 'hour': hour,
+                    'traffic_perc': PARAMETERS['busy_hour_traffic_perc'],
+                    'active_users_km2': active_users_km2,
+                    'market_share_perc': market_share_perc,
+                    'per_user_mbps': per_user_mbps,
+                    'traffic_km2': traffic_km2,
+                    'confidence_interval': PARAMETERS['confidence_level'],
+                    'total_existing_sites_2G': round(region['total_existing_sites_2G']),
+                    'total_existing_sites_4G': round(region['total_existing_sites_4G']),
+                    'mno_existing_sites': region['existing_mno_sites'],
+                    'mno_existing_4G_sites ': region['existing_4G_sites'],
+                    'mno_sites_required': region['mno_sites_required'],
+                    'mno_sites_required_km2': (region['mno_sites_required'] / region['area_km2']),
+                    'mno_cost_entirely_greenfield_tco': region['mno_cost_entirely_greenfield_tco'],
+                    'total_cost_entirely_greenfield_tco': region['total_cost_entirely_greenfield_tco'],
+                    'mno_new_sites ': region['new_mno_sites'],
+                    'mno_upgraded_sites ': region['upgraded_mno_sites'],
+                    'mno_cost_using_existing_infra_tco': region['mno_cost_using_existing_infra_tco'],
+                    'total_cost_using_existing_infra_tco': region['total_cost_using_existing_infra_tco'],
+                    # 'cost_km2': cost / region['area_km2'],
+                    # 'cost_per_sp_user': int(round(cost / sp_users)),
+                    # 'total_regional_cost': int(round(cost / sp_users) * sp_users),
+                })
 
         output = pd.DataFrame(output)
 
@@ -653,4 +847,4 @@ if __name__ == "__main__":
         path = os.path.join(directory, filename)
         output.to_csv(path, index=False)
 
-    collect_results(PARAMETERS)
+    collect_results(countries, PARAMETERS)

@@ -304,17 +304,10 @@ class SimulationManager(object):
             if interference_strt_distance < 20:
                 interference_strt_distance == 20
 
-            ant_height = interfering_transmitter.ant_height
-            ant_type =  interfering_transmitter.ant_type
-
             if interference_strt_distance < simulation_parameters['los_breakpoint_m']:
                 type_of_sight = 'los'
             else:
                 type_of_sight = 'nlos'
-
-            seed_value = (simulation_parameters['seed_value2_{}'.format(generation)] +
-                        simulation_parameters['seed_value2_{}'.format(environment)]
-            )
 
             path_loss, variation = path_loss_calculator(
                 interference_strt_distance, frequency, simulation_parameters)
@@ -330,11 +323,11 @@ class SimulationManager(object):
 
             interference.append(received_interference)
 
-        ave_distance = (
+        ave_distance = round(
             ave_distance / len(self.interfering_transmitters.values())
         )
 
-        ave_pl = (
+        ave_pl = round(
             ave_pl / len(self.interfering_transmitters.values())
         )
 

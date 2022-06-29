@@ -33,7 +33,7 @@ CONFIG.read(os.path.join(os.path.dirname(__file__), 'script_config.ini'))
 BASE_PATH = CONFIG['file_locations']['base_path']
 DATA_INTERMEDIATE = os.path.join(BASE_PATH, 'intermediate')
 
-def generate_receivers(site_area, parameters, grid):
+def generate_receivers(site_area, parameters, grid, iterations):
     """
 
     Generate receiver locations as points within the site area.
@@ -121,7 +121,7 @@ def generate_receivers(site_area, parameters, grid):
         indoor = parameters['indoor_users_percentage'] / 100
 
         id_number = 0
-        for increment_value in range(1, 11):
+        for increment_value in range(1, iterations + 1):
             point = path.interpolate(increment * increment_value)
             indoor_outdoor_probability = np.random.rand(1,1)[0][0]
             receivers.append({
@@ -140,6 +140,19 @@ def generate_receivers(site_area, parameters, grid):
             id_number += 1
 
     return receivers
+
+
+def extract(results):
+    """
+    Extract a single run for inspection.
+
+    """
+    results_directory = os.path.join(DATA_INTERMEDIATE, 'luts', 'individual_results')
+    if not os.path.exists(results_directory):
+        os.mkdir(results_directory)
+    path = os.path.join(results_directory, 'single_run.csv')
+    output = pd.DataFrame(results)
+    output.to_csv(path, index=False)
 
 
 def obtain_percentile_values(results, transmission_type, parameters, confidence_intervals,
@@ -247,10 +260,11 @@ def obtain_percentile_values(results, transmission_type, parameters, confidence_
             ),
             'capacity_mbps': np.percentile(
                 estimated_capacity_values, 100 - confidence_interval
-            ),
+            ) * sectors,
             'capacity_mbps_km2': np.percentile(
                 estimated_capacity_values_km2, 100 - confidence_interval
-            ) * sectors
+            ) * sectors,
+
         })
 
     return output
@@ -372,15 +386,18 @@ if __name__ == '__main__':
 
     CONFIDENCE_INTERVALS = [
         # 5,
-        # 50,
-        95,
+        10,
+        50,
+        90,
+        # 95,
     ]
 
     def generate_site_radii(min, max, increment):
         for n in range(min, max, increment):
             yield n
 
-    INCREMENT_MA = (125, 31000, 125)
+    INCREMENT_MA = (125, 21000, 125)
+    # INCREMENT_MA = (10000, 11500, 1000)
 
     SITE_RADII = {
         'macro': {
@@ -441,7 +458,7 @@ if __name__ == '__main__':
                         projected_crs
                         )
 
-                receivers = generate_receivers(site_area, PARAMETERS, 1)
+                receivers = generate_receivers(site_area, PARAMETERS, 1, 1776)
 
                 for frequency, bandwidth, generation, transmission_type in SPECTRUM_PORTFOLIO:
 
@@ -462,6 +479,8 @@ if __name__ == '__main__':
                         MODULATION_AND_CODING_LUT,
                         PARAMETERS
                         )
+
+                    extract(results)
 
                     percentile_results = obtain_percentile_values(
                         results, transmission_type, PARAMETERS, CONFIDENCE_INTERVALS,
