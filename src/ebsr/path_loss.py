@@ -136,6 +136,7 @@ def generate_log_normal_dist_value(frequency, mu, sigma, seed_value, draws):
     Original function in pysim5G/path_loss.py.
     The parameters mu and sigma in np.random.lognormal are not the mean and STD of the
     lognormal distribution. They are the mean and STD of the underlying normal distribution.
+
     Parameters
     ----------
     frequency : float
@@ -153,11 +154,6 @@ def generate_log_normal_dist_value(frequency, mu, sigma, seed_value, draws):
     random_variation : float
         Mean of the random variation over the specified itations.
     """
-    if seed_value == None:
-        pass
-    else:
-        frequency_seed_value = seed_value * frequency * 100
-        np.random.seed(int(str(frequency_seed_value)[:2]))
 
     normal_std = np.sqrt(np.log10(1 + (sigma/mu)**2))
     normal_mean = np.log10(mu) - normal_std**2 / 2
